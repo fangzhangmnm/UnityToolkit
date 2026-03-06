@@ -39,7 +39,7 @@ namespace ImpactFeel
         public override float Play(ImpactController controller, float strength = 1f)
         {
             Transform targetTransform = controller.GetTransform(targetTransformName);
-            GameObject spawned = GameObject.Instantiate(prefab, targetTransform.localPosition, targetTransform.rotation);
+            GameObject spawned = GameObject.Instantiate(prefab, targetTransform.position, targetTransform.rotation);
             GameObject.Destroy(spawned, lifetime);
             return lifetime;
         }
