@@ -5,65 +5,6 @@ using System.Runtime.CompilerServices;
 
 namespace SimpleBehaviorTree3
 {
-    /*
-    SimpleBehaviorTree3 quick start
-
-    Imports:
-    - using SimpleBehaviorTree3;
-    - using static SimpleBehaviorTree3.Bt;
-
-    Build trees with syntax sugar:
-    - var tree = Priority(
-            Ensure(
-                Action(Reload).IfNot(HasAmmo),
-                Action(Shoot),
-            ).If(EnemyInSight).Name("Combat Loop"),
-            Action(Reload).IfNot(HasAmmo),
-            Action(Patrol)
-        ).Repeat().Name("Main Loop");
-    - BtStatus Attack(bool isFirstFrame, string attackName) 
-        {
-            if(isFirstFrame) anim.Play(attackName);
-            return anim.IsPlaying(attackName) ? BtStatus.Running : BtStatus.Success;
-        }
-
-    Run a tree from a MonoBehaviour:
-    - BtCtx ctx;
-    - BtInstance bt;
-    - void Awake() { ctx = new BtCtx(); bt = new BtInstance(tree, ctx); }
-    - void Update() { bt.Tick(Time.deltaTime); }
-    - void OnDisable() { bt.Abort(); }
-
-    Syntax sugar:
-    - Nodes:
-      Sequence(...)
-      Selector(...)
-      RandomSelector(...)
-      Priority(...)
-      Ensure(...)
-      Wait(seconds)
-      Action(tick, ..., onExit: ..., name: ...)
-    - Decorators:
-      node.If(cond)
-      node.IfNot(cond)
-      node.While(cond)
-      node.WhileNot(cond)
-      node.Timeout(seconds)
-      node.Repeat(count)
-      node.ForceSuccess()
-      node.Name("Label")
-
-    Notes:
-    - Action tick signature is BtStatus Tick(bool isFirstFrame, ...).
-    - Action onExit signature is void OnExit(BtEndReason reason).
-    - BtCtx.deltaTime is the shared subtree tick delta used by time-based nodes like Wait/Timeout.
-    - Priority rechecks earlier children every tick.
-    - Ensure rechecks earlier steps every tick.
-    - Invisible child nodes behave like missing children.
-    - If/IfNot are entry-only visibility gates; While/WhileNot are reactive gates that abort running nodes when they become invisible.
-    - Invisible root nodes abort and return the BtInstance rootInvisibleResult, which defaults to Success.
-    - BtCtx is shared by the whole subtree for one BtInstance run, and carries the rng.
-    */
 
     public enum BtStatus { Success, Failure, Running }
     public enum BtEndReason { Succeeded, Failed, Aborted }
