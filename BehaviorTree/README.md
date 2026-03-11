@@ -2,7 +2,7 @@
 
 A lightweight, modular Behavior Tree framework for Unity and C# projects.
 
-SimpleBehaviorTree3 provides a composable, code-first API for building AI logic using standard behavior tree concepts such as sequences, selectors, decorators, and reactive priority evaluation.
+SimpleBehaviorTree3 provides a composable, code-first API for building AI logic with sequences, selectors, decorators, and reactive control flow.
 
 ---
 
@@ -40,7 +40,7 @@ It supports:
 
 - **Code-first authoring** with fluent syntax sugar
 - **Reactive trees** via `Priority` and `Ensure`
-- **Visibility gating** with `If`, `IfNot`, `While`, `WhileNot`
+- **Visibility policies** with `When`, `While`, `Wheneve` and their `Not` variants
 - **Time control** with `Wait` and `Timeout`
 - **Result mapping** via `ForceSuccess`
 - **Repetition** via `Repeat`
@@ -78,9 +78,9 @@ public class EnemyAI : MonoBehaviour
     {
         BtNode tree = Priority(
             Ensure(
-                Action(Reload).IfNot(HasAmmo),
+                Action(Reload).WhenNot(HasAmmo),
                 Action(Shoot, "Burst", onExit: OnShootExit)
-            ).If(EnemyInSight).Name("Combat"),
+            ).When(EnemyInSight).Name("Combat"),
             Action(Patrol)
         ).Name("MainLoop").Repeat();
 
@@ -97,10 +97,10 @@ public class EnemyAI : MonoBehaviour
         bt.Abort();
     }
 
-    BtStatus Reload(bool isFirstFrame) => BtStatus.Success;
-    BtStatus Shoot(bool isFirstFrame, string fireMode) => BtStatus.Running;
+    BtStatus Reload(float elapsedStateTime) => BtStatus.Success;
+    BtStatus Shoot(float elapsedStateTime, string fireMode) => BtStatus.Running;
     void OnShootExit(BtEndReason reason) { } // reason: Succeeded / Failed / Aborted
-    BtStatus Patrol(bool isFirstFrame) => BtStatus.Running;
+    BtStatus Patrol(float elapsedStateTime) => BtStatus.Running;
     bool HasAmmo(BtCtx c) => false;
     bool EnemyInSight(BtCtx c) => true;
 }
@@ -140,15 +140,15 @@ Each node follows:
   Tries visible children in random order until success or exhaustion.
 
 - `Priority(...)`  
-  Rechecks higher-priority children each tick and can preempt lower running work.
+  Rechecks earlier children each tick and can preempt lower running work; succeeds on the first successful visible child.
 
 - `Ensure(...)`  
-  Reactive sequence that rechecks earlier required steps each tick; fails if any required visible step fails; succeeds only when all required visible steps are done.
+  Rechecks earlier required steps each tick; fails on the first failed visible step; succeeds when all visible steps are done.
 
 ### Leaf Nodes
 
 - `Action(...)`  
-  Callback-based task with first-frame flag and optional `onExit`.
+  Callback-based task with elapsed state time (seconds since enter) and optional `onExit`.
 
 - `Wait(seconds)`  
   Runs for a duration using `ctx.deltaTime`, then succeeds.
@@ -157,11 +157,14 @@ Each node follows:
 
 ## Decorators
 
-- `node.If(cond)` / `node.IfNot(cond)`  
-  Entry-time visibility gate (non-reactive).
+- `node.When(cond)` / `node.WhenNot(cond)`  
+  Entry-time visibility gate, no active self-interruption.
 
 - `node.While(cond)` / `node.WhileNot(cond)`  
-  Reactive visibility gate (can abort while running).
+  Aborts self when it becomes invisible while active.
+
+- `node.Wheneve(cond)` / `node.WheneveNot(cond)`  
+  Aborts self when it is visible again while active (restart-style retrigger).
 
 - `node.Timeout(seconds)`  
   Fails if child exceeds duration while still running.
@@ -214,7 +217,7 @@ if (bt.DebugEnabled) // put this inside your tick loop
 
 - Keep action nodes focused and deterministic.
 - Name important nodes to improve path readability.
-- Prefer `If` for one-time gating and `While` for reactive interruption.
+- Prefer `When` for one-time gating, `While` for invisible interruption, and `Wheneve` for visible retrigger interruption.
 - Use `Timeout` for fail-safe behavior.
 - Use seeded `BtCtx` during testing for reproducible random selection.
 
@@ -226,7 +229,7 @@ if (bt.DebugEnabled) // put this inside your tick loop
   Check root visibility and `rootInvisibleResult`.
 
 - **Reactive node aborts unexpectedly**  
-  Verify `While` condition and external state updates.
+  Verify `While` / `Wheneve` conditions and external state updates.
 
 - **Wait/Timeout behave incorrectly**  
   Ensure `Tick(deltaTime)` is used and `deltaTime` is positive.

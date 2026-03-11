@@ -23,9 +23,9 @@ A task always has a clear boundary marked by `Enter` and `Exit`. A new task runs
 Describe a task using C# Action:
 
 ```csharp
-BtStatus TickAttack(bool isFirstFrame, string attackName)
+BtStatus TickAttack(float elapsedStateTime, string attackName)
 {
-    if(isFirstFrame) anim.Play(attackName);
+    if(elapsedStateTime <= 0f) anim.Play(attackName);
     if(CheckHitboxOverlap()) return BtStatus.Success;
     if(!anim.IsPlaying(attackName)) return BtStatus.Failure;
     return BtStatus.Running;
@@ -57,30 +57,35 @@ var FindFood = Selector(
 );
 ```
 
-In Reactive Behavior Tree, a task may be interrupted externally, when a higher-priority task kicks in.
+In Reactive Behavior Tree, a task may be interrupted when a higher-priority task or visibility policy kicks in.
 
-The difference between `Priority` and `Ensure` is that `Priority` reports success if any task succeeds, `Ensure` reports only after all tasks are cleared. Make sure to write condition nodes. 
+The difference between `Priority` and `Ensure` is that `Priority` reports success if any task succeeds, while `Ensure` reports success only after all visible steps are cleared.
 
 ```csharp
 var StrictlyWLBProgrammer = Priority(
-    Eat.If(IsHungry),
-    Sleep.If(IsTired),
+    Eat.When(IsHungry),
+    Sleep.When(IsTired),
     Develop.WhileNot(IsTaskDone),
     Idle,
 );
 var BabyHandler = Ensure(
-    HandleChoking.If(IsChoking),
-    Comfort.If(IsCrying),
-    Feed.If(IsHungry),
+    HandleChoking.When(IsChoking),
+    Comfort.When(IsCrying),
+    Feed.When(IsHungry),
     TeachCalculus
 );
 ```
 
-The difference between `If` and `While` nodes is whether the task should be interrupted when the condition no longer holds.
+Use three visibility policies:
+- `When`: entry gate only.
+- `While`: interrupt self when condition turns false while active.
+- `Wheneve`: interrupt self when condition is true again while active.
+
 ```csharp
 var Sleep = Wait(28800);
-Sleep.If(IsTired); // sleep for 8 hours
+Sleep.When(IsTired); // sleep for 8 hours
 Sleep.While(IsTired); // sleep for up to 8 hours
+TakeHit.Wheneve(WasHit); // re-enter hit reaction on retrigger
 ```
 
 ---

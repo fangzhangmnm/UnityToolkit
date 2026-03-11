@@ -5,7 +5,6 @@ using System.Runtime.CompilerServices;
 
 namespace SimpleBehaviorTree3
 {
-
     public enum BtStatus { Success, Failure, Running }
     public enum BtEndReason { Succeeded, Failed, Aborted }
 
@@ -529,10 +528,10 @@ namespace SimpleBehaviorTree3
     }
 
     // Rechecks earlier children every tick, skips invisible options, and runs the first visible child that does not fail.
-    public sealed class PrioritySelectorNode : CompositeNode
+    public class ReactiveSelectorNode : CompositeNode
     {
-        public PrioritySelectorNode(params BtNode[] children) : this(null, children) { }
-        public PrioritySelectorNode(string name, params BtNode[] children) : base(ResolveName(name, "Priority"), children) { }
+        public ReactiveSelectorNode(params BtNode[] children) : this(null, children) { }
+        public ReactiveSelectorNode(string name, params BtNode[] children) : base(ResolveName(name, "Priority"), children) { }
 
         public override IBtRuntime Enter(BtCtx ctx)
             => new CompositeRuntime();
@@ -564,10 +563,10 @@ namespace SimpleBehaviorTree3
     }
 
     // Rechecks earlier children every tick, skips invisible steps, and keeps the first visible unfinished step as current.
-    public sealed class PrioritySequencerNode : CompositeNode
+    public class ReactiveSequencerNode : CompositeNode
     {
-        public PrioritySequencerNode(params BtNode[] children) : this(null, children) { }
-        public PrioritySequencerNode(string name, params BtNode[] children) : base(ResolveName(name, "Ensure"), children) { }
+        public ReactiveSequencerNode(params BtNode[] children) : this(null, children) { }
+        public ReactiveSequencerNode(string name, params BtNode[] children) : base(ResolveName(name, "Ensure"), children) { }
 
         public override IBtRuntime Enter(BtCtx ctx)
             => new CompositeRuntime();
@@ -631,18 +630,21 @@ namespace SimpleBehaviorTree3
             => child.IsVisible(ctx, isActive);
     }
 
-    // Controls whether the child is visible to its parent; optionally aborts running execution on visibility changes.
-    public sealed class VisibilityNode : DecoratorNode
+    // Controls entry visibility and active interruption policy for one child.
+    public class VisibilityNode : DecoratorNode
     {
         readonly Func<BtCtx, bool> cond;
         readonly bool invert;
-        readonly bool abortOnChange;
+        readonly bool interruptSelfOnVisible;
+        readonly bool interruptSelfOnInvisible;
 
-        public VisibilityNode(BtNode child, Func<BtCtx, bool> cond, bool invert, bool abortOnChange, string name = null) : base(child, ResolveName(name, invert ? (abortOnChange ? "WhileNot" : "IfNot") : (abortOnChange ? "While" : "If")))
+        public VisibilityNode(BtNode child, Func<BtCtx, bool> cond, bool invert, bool interruptSelfOnVisible, bool interruptSelfOnInvisible, string name = null)
+            : base(child, ResolveName(name, "Visibility"))
         {
             this.cond = cond;
             this.invert = invert;
-            this.abortOnChange = abortOnChange;
+            this.interruptSelfOnVisible = interruptSelfOnVisible;
+            this.interruptSelfOnInvisible = interruptSelfOnInvisible;
         }
 
         bool ConditionMatches(BtCtx ctx) => cond == null || cond(ctx);
@@ -650,6 +652,12 @@ namespace SimpleBehaviorTree3
         public override BtStatus Tick(IBtRuntime _rt, BtCtx ctx)
         {
             var rt = (DecoratorRuntime)_rt;
+            var condRaw = ConditionMatches(ctx);
+            var visibleNow = invert ? !condRaw : condRaw;
+            if (rt.child.IsActive && interruptSelfOnVisible && visibleNow)
+                rt.child.Abort(ctx);
+            if (rt.child.IsActive && interruptSelfOnInvisible && !visibleNow)
+                rt.child.Abort(ctx);
             return rt.child.Tick(ctx);
         }
 
@@ -658,10 +666,14 @@ namespace SimpleBehaviorTree3
 
         internal override bool IsVisible(BtCtx ctx, bool isActive)
         {
-            var gatePass = invert ? !ConditionMatches(ctx) : ConditionMatches(ctx);
-            if (isActive && !abortOnChange)
-                gatePass = true;
-            return gatePass && child.IsVisible(ctx, isActive);
+            var condRaw = ConditionMatches(ctx);
+            var visibleNow = invert ? !condRaw : condRaw;
+            if (!isActive)
+                return visibleNow && child.IsVisible(ctx, false);
+
+            if (!visibleNow && interruptSelfOnInvisible)
+                return false;
+            return child.IsVisible(ctx, true);
         }
 
         internal override bool ShouldLogLifecycle(IBtRuntime rt)
@@ -858,16 +870,16 @@ namespace SimpleBehaviorTree3
 
     internal sealed class ActionRuntime : IBtRuntime
     {
-        internal bool isFirstFrame = true;
+        internal float elapsedStateTime;
     }
 
-    // Calls one callback every tick, with a first-frame flag and an optional final callback on exit.
+    // Calls one callback every tick, with elapsed time in this state and an optional final callback on exit.
     public sealed class ActionNode : BtNode
     {
-        readonly Func<bool, BtStatus> tick;
+        readonly Func<float, BtStatus> tick;
         readonly global::System.Action<BtEndReason> onExit;
 
-        public ActionNode(Func<bool, BtStatus> tick, global::System.Action<BtEndReason> onExit = null, string name = null)
+        public ActionNode(Func<float, BtStatus> tick, global::System.Action<BtEndReason> onExit = null, string name = null)
             : base(ResolveDelegateName(tick, name, "Action"))
         {
             this.tick = tick ?? throw new ArgumentNullException(nameof(tick));
@@ -880,8 +892,9 @@ namespace SimpleBehaviorTree3
         public override BtStatus Tick(IBtRuntime _rt, BtCtx ctx)
         {
             var rt = (ActionRuntime)_rt;
-            var status = tick(rt.isFirstFrame);
-            rt.isFirstFrame = false;
+            var status = tick(rt.elapsedStateTime);
+            if (status == BtStatus.Running)
+                rt.elapsedStateTime += Math.Max(0f, ctx.deltaTime);
             return status;
         }
 
@@ -917,35 +930,35 @@ namespace SimpleBehaviorTree3
 
         /// <summary>Rechecks earlier options every tick and lets higher-priority work preempt lower running work.</summary>
         public static BtNode Priority(params BtNode[] children)
-            => new PrioritySelectorNode(children);
+            => new ReactiveSelectorNode(children);
 
         /// <summary>Rechecks earlier options every tick and lets higher-priority work preempt lower running work.</summary>
         public static BtNode Priority(string name, params BtNode[] children)
-            => new PrioritySelectorNode(name, children);
+            => new ReactiveSelectorNode(name, children);
 
-        /// <summary>Rechecks earlier steps every tick and treats invisible steps as missing.</summary>
+        /// <summary>Rechecks earlier required steps every tick and treats invisible steps as missing.</summary>
         public static BtNode Ensure(params BtNode[] children)
-            => new PrioritySequencerNode(children);
+            => new ReactiveSequencerNode(children);
 
-        /// <summary>Rechecks earlier steps every tick and treats invisible steps as missing.</summary>
+        /// <summary>Rechecks earlier required steps every tick and treats invisible steps as missing.</summary>
         public static BtNode Ensure(string name, params BtNode[] children)
-            => new PrioritySequencerNode(name, children);
+            => new ReactiveSequencerNode(name, children);
 
-        /// <summary>Runs one callback every tick; the first tick is flagged and the onExit callback runs on success, failure, or abort.</summary>
-        public static BtNode Action(Func<bool, BtStatus> tick, global::System.Action<BtEndReason> onExit = null, string name = null)
+        /// <summary>Runs one callback every tick with elapsed state time in seconds; onExit runs on success, failure, or abort.</summary>
+        public static BtNode Action(Func<float, BtStatus> tick, global::System.Action<BtEndReason> onExit = null, string name = null)
             => new ActionNode(tick, onExit, name);
 
-        /// <summary>Runs one callback every tick; the first tick is flagged and the onExit callback runs on success, failure, or abort.</summary>
-        public static BtNode Action<T1>(Func<bool, T1, BtStatus> tick, T1 p1, global::System.Action<BtEndReason> onExit = null, string name = null)
-            => new ActionNode(firstFrame => tick(firstFrame, p1), onExit, BtNode.ResolveDelegateName(tick, name, "Action"));
+        /// <summary>Runs one callback every tick with elapsed state time in seconds; onExit runs on success, failure, or abort.</summary>
+        public static BtNode Action<T1>(Func<float, T1, BtStatus> tick, T1 p1, global::System.Action<BtEndReason> onExit = null, string name = null)
+            => new ActionNode(elapsedStateTime => tick(elapsedStateTime, p1), onExit, BtNode.ResolveDelegateName(tick, name, "Action"));
 
-        /// <summary>Runs one callback every tick; the first tick is flagged and the onExit callback runs on success, failure, or abort.</summary>
-        public static BtNode Action<T1, T2>(Func<bool, T1, T2, BtStatus> tick, T1 p1, T2 p2, global::System.Action<BtEndReason> onExit = null, string name = null)
-            => new ActionNode(firstFrame => tick(firstFrame, p1, p2), onExit, BtNode.ResolveDelegateName(tick, name, "Action"));
+        /// <summary>Runs one callback every tick with elapsed state time in seconds; onExit runs on success, failure, or abort.</summary>
+        public static BtNode Action<T1, T2>(Func<float, T1, T2, BtStatus> tick, T1 p1, T2 p2, global::System.Action<BtEndReason> onExit = null, string name = null)
+            => new ActionNode(elapsedStateTime => tick(elapsedStateTime, p1, p2), onExit, BtNode.ResolveDelegateName(tick, name, "Action"));
 
-        /// <summary>Runs one callback every tick; the first tick is flagged and the onExit callback runs on success, failure, or abort.</summary>
-        public static BtNode Action<T1, T2, T3>(Func<bool, T1, T2, T3, BtStatus> tick, T1 p1, T2 p2, T3 p3, global::System.Action<BtEndReason> onExit = null, string name = null)
-            => new ActionNode(firstFrame => tick(firstFrame, p1, p2, p3), onExit, BtNode.ResolveDelegateName(tick, name, "Action"));
+        /// <summary>Runs one callback every tick with elapsed state time in seconds; onExit runs on success, failure, or abort.</summary>
+        public static BtNode Action<T1, T2, T3>(Func<float, T1, T2, T3, BtStatus> tick, T1 p1, T2 p2, T3 p3, global::System.Action<BtEndReason> onExit = null, string name = null)
+            => new ActionNode(elapsedStateTime => tick(elapsedStateTime, p1, p2, p3), onExit, BtNode.ResolveDelegateName(tick, name, "Action"));
 
         /// <summary>Waits for the configured duration, then succeeds.</summary>
         public static BtNode Wait(float duration, string name = null)
@@ -954,85 +967,128 @@ namespace SimpleBehaviorTree3
 
     public static class BtNodeExt
     {
-        /// <summary>Shows the child only when the condition is true; once entered, it does not abort on condition changes.</summary>
-        public static BtNode If(this BtNode child, Func<bool> cond, string name = null)
-            => new VisibilityNode(child, _ => cond(), false, false, BtNode.ResolveDelegateName(cond, name, "If"));
+        static BtNode WithVisibilityNode(BtNode child, Func<BtCtx, bool> cond, bool invert, bool interruptSelfOnVisible, bool interruptSelfOnInvisible, Delegate condDelegate, string name, string defaultName)
+            => new VisibilityNode(child, cond, invert, interruptSelfOnVisible, interruptSelfOnInvisible, BtNode.ResolveDelegateName(condDelegate, name, defaultName));
 
-        /// <summary>Shows the child only when the condition is true; once entered, it does not abort on condition changes.</summary>
-        public static BtNode If(this BtNode child, Func<BtCtx, bool> cond, string name = null)
-            => new VisibilityNode(child, cond, false, false, BtNode.ResolveDelegateName(cond, name, "If"));
+        /// <summary>Shows the child when the condition is true; entry gate only, no active self-interruption.</summary>
+        public static BtNode When(this BtNode child, Func<bool> cond, string name = null)
+            => WithVisibilityNode(child, _ => cond(), false, false, false, cond, name, "When");
 
-        /// <summary>Shows the child only when the condition is true; once entered, it does not abort on condition changes.</summary>
-        public static BtNode If<T1>(this BtNode child, Func<T1, bool> cond, T1 p1, string name = null)
-            => new VisibilityNode(child, _ => cond(p1), false, false, BtNode.ResolveDelegateName(cond, name, "If"));
+        /// <summary>Shows the child when the condition is true; entry gate only, no active self-interruption.</summary>
+        public static BtNode When(this BtNode child, Func<BtCtx, bool> cond, string name = null)
+            => WithVisibilityNode(child, cond, false, false, false, cond, name, "When");
 
-        /// <summary>Shows the child only when the condition is true; once entered, it does not abort on condition changes.</summary>
-        public static BtNode If<T1, T2>(this BtNode child, Func<T1, T2, bool> cond, T1 p1, T2 p2, string name = null)
-            => new VisibilityNode(child, _ => cond(p1, p2), false, false, BtNode.ResolveDelegateName(cond, name, "If"));
+        /// <summary>Shows the child when the condition is true; entry gate only, no active self-interruption.</summary>
+        public static BtNode When<T1>(this BtNode child, Func<T1, bool> cond, T1 p1, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1), false, false, false, cond, name, "When");
 
-        /// <summary>Shows the child only when the condition is true; once entered, it does not abort on condition changes.</summary>
-        public static BtNode If<T1, T2, T3>(this BtNode child, Func<T1, T2, T3, bool> cond, T1 p1, T2 p2, T3 p3, string name = null)
-            => new VisibilityNode(child, _ => cond(p1, p2, p3), false, false, BtNode.ResolveDelegateName(cond, name, "If"));
+        /// <summary>Shows the child when the condition is true; entry gate only, no active self-interruption.</summary>
+        public static BtNode When<T1, T2>(this BtNode child, Func<T1, T2, bool> cond, T1 p1, T2 p2, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1, p2), false, false, false, cond, name, "When");
 
-        /// <summary>Shows the child only when the condition is false; once entered, it does not abort on condition changes.</summary>
-        public static BtNode IfNot(this BtNode child, Func<bool> cond, string name = null)
-            => new VisibilityNode(child, _ => cond(), true, false, BtNode.ResolveDelegateName(cond, name, "IfNot"));
+        /// <summary>Shows the child when the condition is true; entry gate only, no active self-interruption.</summary>
+        public static BtNode When<T1, T2, T3>(this BtNode child, Func<T1, T2, T3, bool> cond, T1 p1, T2 p2, T3 p3, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1, p2, p3), false, false, false, cond, name, "When");
 
-        /// <summary>Shows the child only when the condition is false; once entered, it does not abort on condition changes.</summary>
-        public static BtNode IfNot(this BtNode child, Func<BtCtx, bool> cond, string name = null)
-            => new VisibilityNode(child, cond, true, false, BtNode.ResolveDelegateName(cond, name, "IfNot"));
-
-        /// <summary>Shows the child only when the condition is false; once entered, it does not abort on condition changes.</summary>
-        public static BtNode IfNot<T1>(this BtNode child, Func<T1, bool> cond, T1 p1, string name = null)
-            => new VisibilityNode(child, _ => cond(p1), true, false, BtNode.ResolveDelegateName(cond, name, "IfNot"));
-
-        /// <summary>Shows the child only when the condition is false; once entered, it does not abort on condition changes.</summary>
-        public static BtNode IfNot<T1, T2>(this BtNode child, Func<T1, T2, bool> cond, T1 p1, T2 p2, string name = null)
-            => new VisibilityNode(child, _ => cond(p1, p2), true, false, BtNode.ResolveDelegateName(cond, name, "IfNot"));
-
-        /// <summary>Shows the child only when the condition is false; once entered, it does not abort on condition changes.</summary>
-        public static BtNode IfNot<T1, T2, T3>(this BtNode child, Func<T1, T2, T3, bool> cond, T1 p1, T2 p2, T3 p3, string name = null)
-            => new VisibilityNode(child, _ => cond(p1, p2, p3), true, false, BtNode.ResolveDelegateName(cond, name, "IfNot"));
-
-        /// <summary>Shows the child only while the condition is true, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Shows the child only while the condition is true; aborts self when it turns invisible while active.</summary>
         public static BtNode While(this BtNode child, Func<bool> cond, string name = null)
-            => new VisibilityNode(child, _ => cond(), false, true, BtNode.ResolveDelegateName(cond, name, "While"));
+            => WithVisibilityNode(child, _ => cond(), false, false, true, cond, name, "While");
 
-        /// <summary>Shows the child only while the condition is true, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Shows the child only while the condition is true; aborts self when it turns invisible while active.</summary>
         public static BtNode While(this BtNode child, Func<BtCtx, bool> cond, string name = null)
-            => new VisibilityNode(child, cond, false, true, BtNode.ResolveDelegateName(cond, name, "While"));
+            => WithVisibilityNode(child, cond, false, false, true, cond, name, "While");
 
-        /// <summary>Shows the child only while the condition is true, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Shows the child only while the condition is true; aborts self when it turns invisible while active.</summary>
         public static BtNode While<T1>(this BtNode child, Func<T1, bool> cond, T1 p1, string name = null)
-            => new VisibilityNode(child, _ => cond(p1), false, true, BtNode.ResolveDelegateName(cond, name, "While"));
+            => WithVisibilityNode(child, _ => cond(p1), false, false, true, cond, name, "While");
 
-        /// <summary>Shows the child only while the condition is true, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Shows the child only while the condition is true; aborts self when it turns invisible while active.</summary>
         public static BtNode While<T1, T2>(this BtNode child, Func<T1, T2, bool> cond, T1 p1, T2 p2, string name = null)
-            => new VisibilityNode(child, _ => cond(p1, p2), false, true, BtNode.ResolveDelegateName(cond, name, "While"));
+            => WithVisibilityNode(child, _ => cond(p1, p2), false, false, true, cond, name, "While");
 
-        /// <summary>Shows the child only while the condition is true, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Shows the child only while the condition is true; aborts self when it turns invisible while active.</summary>
         public static BtNode While<T1, T2, T3>(this BtNode child, Func<T1, T2, T3, bool> cond, T1 p1, T2 p2, T3 p3, string name = null)
-            => new VisibilityNode(child, _ => cond(p1, p2, p3), false, true, BtNode.ResolveDelegateName(cond, name, "While"));
+            => WithVisibilityNode(child, _ => cond(p1, p2, p3), false, false, true, cond, name, "While");
 
-        /// <summary>Shows the child only while the condition is false, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Shows the child when the condition is true; aborts self and re-enters when condition is true again while active.</summary>
+        public static BtNode Whenever(this BtNode child, Func<bool> cond, string name = null)
+            => WithVisibilityNode(child, _ => cond(), false, true, false, cond, name, "Whenever");
+
+        /// <summary>Shows the child when the condition is true; aborts self and re-enters when condition is true again while active.</summary>
+        public static BtNode Whenever(this BtNode child, Func<BtCtx, bool> cond, string name = null)
+            => WithVisibilityNode(child, cond, false, true, false, cond, name, "Whenever");
+
+        /// <summary>Shows the child when the condition is true; aborts self and re-enters when condition is true again while active.</summary>
+        public static BtNode Whenever<T1>(this BtNode child, Func<T1, bool> cond, T1 p1, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1), false, true, false, cond, name, "Whenever");
+
+        /// <summary>Shows the child when the condition is true; aborts self and re-enters when condition is true again while active.</summary>
+        public static BtNode Whenever<T1, T2>(this BtNode child, Func<T1, T2, bool> cond, T1 p1, T2 p2, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1, p2), false, true, false, cond, name, "Whenever");
+
+        /// <summary>Shows the child when the condition is true; aborts self and re-enters when condition is true again while active.</summary>
+        public static BtNode Whenever<T1, T2, T3>(this BtNode child, Func<T1, T2, T3, bool> cond, T1 p1, T2 p2, T3 p3, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1, p2, p3), false, true, false, cond, name, "Whenever");
+
+        /// <summary>Equivalent to <see cref="When(BtNode, Func{bool}, string)"/> with negated condition.</summary>
+        public static BtNode WhenNot(this BtNode child, Func<bool> cond, string name = null)
+            => WithVisibilityNode(child, _ => cond(), true, false, false, cond, name, "WhenNot");
+
+        /// <summary>Equivalent to <see cref="When(BtNode, Func{BtCtx, bool}, string)"/> with negated condition.</summary>
+        public static BtNode WhenNot(this BtNode child, Func<BtCtx, bool> cond, string name = null)
+            => WithVisibilityNode(child, cond, true, false, false, cond, name, "WhenNot");
+
+        /// <summary>Negated-condition variant of <c>When</c> with one bound parameter.</summary>
+        public static BtNode WhenNot<T1>(this BtNode child, Func<T1, bool> cond, T1 p1, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1), true, false, false, cond, name, "WhenNot");
+
+        /// <summary>Negated-condition variant of <c>When</c> with two bound parameters.</summary>
+        public static BtNode WhenNot<T1, T2>(this BtNode child, Func<T1, T2, bool> cond, T1 p1, T2 p2, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1, p2), true, false, false, cond, name, "WhenNot");
+
+        /// <summary>Negated-condition variant of <c>When</c> with three bound parameters.</summary>
+        public static BtNode WhenNot<T1, T2, T3>(this BtNode child, Func<T1, T2, T3, bool> cond, T1 p1, T2 p2, T3 p3, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1, p2, p3), true, false, false, cond, name, "WhenNot");
+
+        /// <summary>Equivalent to <see cref="While(BtNode, Func{bool}, string)"/> with negated condition.</summary>
         public static BtNode WhileNot(this BtNode child, Func<bool> cond, string name = null)
-            => new VisibilityNode(child, _ => cond(), true, true, BtNode.ResolveDelegateName(cond, name, "WhileNot"));
+            => WithVisibilityNode(child, _ => cond(), true, false, true, cond, name, "WhileNot");
 
-        /// <summary>Shows the child only while the condition is false, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Equivalent to <see cref="While(BtNode, Func{BtCtx, bool}, string)"/> with negated condition.</summary>
         public static BtNode WhileNot(this BtNode child, Func<BtCtx, bool> cond, string name = null)
-            => new VisibilityNode(child, cond, true, true, BtNode.ResolveDelegateName(cond, name, "WhileNot"));
+            => WithVisibilityNode(child, cond, true, false, true, cond, name, "WhileNot");
 
-        /// <summary>Shows the child only while the condition is false, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Negated-condition variant of <c>While</c> with one bound parameter.</summary>
         public static BtNode WhileNot<T1>(this BtNode child, Func<T1, bool> cond, T1 p1, string name = null)
-            => new VisibilityNode(child, _ => cond(p1), true, true, BtNode.ResolveDelegateName(cond, name, "WhileNot"));
+            => WithVisibilityNode(child, _ => cond(p1), true, false, true, cond, name, "WhileNot");
 
-        /// <summary>Shows the child only while the condition is false, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Negated-condition variant of <c>While</c> with two bound parameters.</summary>
         public static BtNode WhileNot<T1, T2>(this BtNode child, Func<T1, T2, bool> cond, T1 p1, T2 p2, string name = null)
-            => new VisibilityNode(child, _ => cond(p1, p2), true, true, BtNode.ResolveDelegateName(cond, name, "WhileNot"));
+            => WithVisibilityNode(child, _ => cond(p1, p2), true, false, true, cond, name, "WhileNot");
 
-        /// <summary>Shows the child only while the condition is false, and aborts it if it turns invisible during execution.</summary>
+        /// <summary>Negated-condition variant of <c>While</c> with three bound parameters.</summary>
         public static BtNode WhileNot<T1, T2, T3>(this BtNode child, Func<T1, T2, T3, bool> cond, T1 p1, T2 p2, T3 p3, string name = null)
-            => new VisibilityNode(child, _ => cond(p1, p2, p3), true, true, BtNode.ResolveDelegateName(cond, name, "WhileNot"));
+            => WithVisibilityNode(child, _ => cond(p1, p2, p3), true, false, true, cond, name, "WhileNot");
+
+        /// <summary>Equivalent to <see cref="Whenever(BtNode, Func{bool}, string)"/> with negated condition.</summary>
+        public static BtNode WheneverNot(this BtNode child, Func<bool> cond, string name = null)
+            => WithVisibilityNode(child, _ => cond(), true, true, false, cond, name, "WheneverNot");
+
+        /// <summary>Equivalent to <see cref="Whenever(BtNode, Func{BtCtx, bool}, string)"/> with negated condition.</summary>
+        public static BtNode WheneverNot(this BtNode child, Func<BtCtx, bool> cond, string name = null)
+            => WithVisibilityNode(child, cond, true, true, false, cond, name, "WheneverNot");
+
+        /// <summary>Negated-condition variant of <c>Whenever</c> with one bound parameter.</summary>
+        public static BtNode WheneverNot<T1>(this BtNode child, Func<T1, bool> cond, T1 p1, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1), true, true, false, cond, name, "WheneverNot");
+
+        /// <summary>Negated-condition variant of <c>Whenever</c> with two bound parameters.</summary>
+        public static BtNode WheneverNot<T1, T2>(this BtNode child, Func<T1, T2, bool> cond, T1 p1, T2 p2, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1, p2), true, true, false, cond, name, "WheneverNot");
+
+        /// <summary>Negated-condition variant of <c>Whenever</c> with three bound parameters.</summary>
+        public static BtNode WheneverNot<T1, T2, T3>(this BtNode child, Func<T1, T2, T3, bool> cond, T1 p1, T2 p2, T3 p3, string name = null)
+            => WithVisibilityNode(child, _ => cond(p1, p2, p3), true, true, false, cond, name, "WheneverNot");
 
         /// <summary>Re-runs the child until it has succeeded enough times; negative counts repeat forever.</summary>
         public static BtNode Repeat(this BtNode child, int repeat = -1, string name = null)
